@@ -28,10 +28,11 @@ def main():
             BasicTSLauncher.launch_training(BasicTSForecastingConfig(
                 model=iTransformerForForecasting,
                 model_config=model_config,
-                dataset_name="ETTh1",
+                dataset_name="SO3",
+                dataset_params={"data_file_path": r"D:\云天化\软仪表\BasicTS\datasets\二期磷酸\dap_all_targets\SO3"},
                 input_len=input_len,
                 output_len=output_len,
-                gpus="0",
+                gpus=None,
                 callbacks=[EarlyStopping(), GradientClipping(1.0)], # use callbacks
                 seed=233,
                 num_epochs=100,
