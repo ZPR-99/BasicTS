@@ -102,7 +102,7 @@ CONFIG = {
         "add_time_of_day": True,
         "add_day_of_week": True,
         "domain": "二期磷酸",
-        "metrics": ["MAE", "MSE"],
+        "metrics": ["RMSE", "MAE", "MAPE", "R2", "TDA"],
         "null_val": None,
     },
 }
