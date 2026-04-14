@@ -1,4 +1,3 @@
-
 import gc
 import json
 import os
@@ -104,6 +103,10 @@ CONFIG = {
         "domain": "二期磷酸",
         "metrics": ["RMSE", "MAE", "MAPE", "R2", "TDA"],
         "null_val": None,
+        "ml_subdir": "机器学习",
+        "dl_subdir": "深度学习",
+        "ml_task_type": "tabular_regression_ml",
+        "dl_task_type": "tabular_regression_torch",
     },
 }
 
@@ -147,6 +150,18 @@ def get_lab_target_cols():
 
 def get_sample_target_cols():
     return list(CONFIG["sample_targets"])
+
+
+def get_output_root_dir():
+    return CONFIG["paths"]["output_root_dir"]
+
+
+def get_ml_root_dir():
+    return os.path.join(get_output_root_dir(), CONFIG["standardized_output"]["ml_subdir"])
+
+
+def get_dl_root_dir():
+    return os.path.join(get_output_root_dir(), CONFIG["standardized_output"]["dl_subdir"])
 
 
 def sanitize_columns(df, context=""):
@@ -956,7 +971,61 @@ def split_dataframe_by_ratio(df, ratio_list):
     }
 
 
-def export_single_target_dataset(target_name, sample_df, target_dir):
+def build_dataset_meta(
+        target_name,
+        sample_df,
+        feature_cols,
+        ts_desc,
+        split_info,
+        task_type,
+        consumer_name):
+    cfg = CONFIG["standardized_output"]
+
+    return {
+        "name": target_name,
+        "domain": cfg["domain"],
+        "task_type": task_type,
+        "consumer": consumer_name,
+        "frequency": get_time_frequency(),
+        "shape": [int(sample_df.shape[0]), int(len(feature_cols))],
+        "timestamps_shape": [int(sample_df.shape[0]), int(len(ts_desc))],
+        "timestamps_description": ts_desc,
+        "num_samples": int(sample_df.shape[0]),
+        "num_features": int(len(feature_cols)),
+        "target_name": target_name,
+        "split": {
+            "train_len": int(split_info["train_len"]),
+            "val_len": int(split_info["val_len"]),
+            "test_len": int(split_info["test_len"]),
+            "train_val_test_ratio": [float(x) for x in split_info["normalized_ratio"]],
+        },
+        "regular_settings": {
+            "train_val_test_ratio": [float(x) for x in split_info["normalized_ratio"]],
+            "norm_each_channel": False,
+            "rescale": False,
+            "metrics": cfg["metrics"],
+            "null_val": cfg["null_val"],
+        },
+        "files": {
+            "train_data": "train_data.npy",
+            "val_data": "val_data.npy",
+            "test_data": "test_data.npy",
+            "train_label": "train_label.npy",
+            "val_label": "val_label.npy",
+            "test_label": "test_label.npy",
+            "train_timestamps": "train_timestamps.npy",
+            "val_timestamps": "val_timestamps.npy",
+            "test_timestamps": "test_timestamps.npy",
+        },
+    }
+
+
+def export_single_target_dataset_generic(
+        target_name,
+        sample_df,
+        target_dir,
+        task_type,
+        consumer_name):
     cfg = CONFIG["standardized_output"]
     timestamp_col = get_timestamp_col()
 
@@ -974,7 +1043,7 @@ def export_single_target_dataset(target_name, sample_df, target_dir):
         c for c in sample_df.columns
         if c not in [timestamp_col, target_name]
     ]
-    feature_cols = deduplicate_preserve_order(feature_cols, context=f"{target_name}_standardized_feature_cols")
+    feature_cols = deduplicate_preserve_order(feature_cols, context=f"{target_name}_{consumer_name}_feature_cols")
 
     if not feature_cols:
         log(f"{target_name}: 无可用特征列，跳过")
@@ -1011,66 +1080,71 @@ def export_single_target_dataset(target_name, sample_df, target_dir):
     np.save(os.path.join(target_dir, "val_timestamps.npy"), val_ts)
     np.save(os.path.join(target_dir, "test_timestamps.npy"), test_ts)
 
-    meta = {
-        "name": target_name,
-        "domain": cfg["domain"],
-        "task_type": "tabular_regression",
-        "frequency": get_time_frequency(),
-        "shape": [int(sample_df.shape[0]), int(len(feature_cols))],
-        "timestamps_shape": [int(sample_df.shape[0]), int(len(ts_desc))],
-        "timestamps_description": ts_desc,
-        "num_samples": int(sample_df.shape[0]),
-        "num_features": int(len(feature_cols)),
-        "target_name": target_name,
-        "split": {
-            "train_len": int(split_info["train_len"]),
-            "val_len": int(split_info["val_len"]),
-            "test_len": int(split_info["test_len"]),
-            "train_val_test_ratio": [float(x) for x in split_info["normalized_ratio"]],
-        },
-        "regular_settings": {
-            "train_val_test_ratio": [float(x) for x in split_info["normalized_ratio"]],
-            "norm_each_channel": False,
-            "rescale": False,
-            "metrics": cfg["metrics"],
-            "null_val": cfg["null_val"],
-        },
-        "files": {
-            "train_data": "train_data.npy",
-            "val_data": "val_data.npy",
-            "test_data": "test_data.npy",
-            "train_label": "train_label.npy",
-            "val_label": "val_label.npy",
-            "test_label": "test_label.npy",
-            "train_timestamps": "train_timestamps.npy",
-            "val_timestamps": "val_timestamps.npy",
-            "test_timestamps": "test_timestamps.npy",
-        },
-    }
+    meta = build_dataset_meta(
+        target_name=target_name,
+        sample_df=sample_df,
+        feature_cols=feature_cols,
+        ts_desc=ts_desc,
+        split_info=split_info,
+        task_type=task_type,
+        consumer_name=consumer_name,
+    )
 
     meta_path = os.path.join(target_dir, "meta.json")
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=4)
 
-    log(f"{target_name}: 标准化数据集已输出到 {target_dir}")
-    log(f"{target_name}: train/val/test = {split_info['train_len']}/{split_info['val_len']}/{split_info['test_len']}")
+    log(
+        f"{target_name}: {consumer_name} 数据集已输出到 {target_dir} | "
+        f"train/val/test = {split_info['train_len']}/{split_info['val_len']}/{split_info['test_len']}"
+    )
 
-    del train_df, val_df, test_df, train_x, val_x, test_x, train_y, val_y, test_y, train_ts, val_ts, test_ts
-    force_gc(f"export_single_target_dataset::{target_name}")
+    del train_df, val_df, test_df
+    del train_x, val_x, test_x, train_y, val_y, test_y, train_ts, val_ts, test_ts
+    force_gc(f"export_single_target_dataset_generic::{target_name}::{consumer_name}")
+
     return {
         "target_name": target_name,
         "target_dir": target_dir,
         "num_samples": int(sample_df.shape[0]),
         "num_features": int(len(feature_cols)),
+        "consumer": consumer_name,
+        "task_type": task_type,
     }
 
 
-def process_targets_and_export(rt_indexed, merged_with_target_df, input_cols, output_root_dir):
+def export_single_target_dataset_ml(target_name, sample_df, target_dir):
+    return export_single_target_dataset_generic(
+        target_name=target_name,
+        sample_df=sample_df,
+        target_dir=target_dir,
+        task_type=CONFIG["standardized_output"]["ml_task_type"],
+        consumer_name="机器学习",
+    )
+
+
+def export_single_target_dataset_dl(target_name, sample_df, target_dir):
+    return export_single_target_dataset_generic(
+        target_name=target_name,
+        sample_df=sample_df,
+        target_dir=target_dir,
+        task_type=CONFIG["standardized_output"]["dl_task_type"],
+        consumer_name="深度学习",
+    )
+
+
+def process_targets_and_export(rt_indexed, merged_with_target_df, input_cols):
     sample_targets = get_sample_target_cols()
     dataset_summaries = []
     timestamp_col = get_timestamp_col()
 
-    log_step("步骤4：按目标逐个构造特征 -> 清洗缩容 -> 筛选 -> 导出")
+    ml_root_dir = get_ml_root_dir()
+    dl_root_dir = get_dl_root_dir()
+
+    ensure_dir(ml_root_dir)
+    ensure_dir(dl_root_dir)
+
+    log_step("步骤4：按目标逐个构造特征 -> 清洗缩容 -> 筛选 -> 双路导出")
 
     for target_col in sample_targets:
         if target_col not in merged_with_target_df.columns:
@@ -1131,18 +1205,28 @@ def process_targets_and_export(rt_indexed, merged_with_target_df, input_cols, ou
         del target_full_df
         force_gc(f"{target_col}::after_select_sample_df")
 
-        target_dir = os.path.join(output_root_dir, target_col)
-        summary = export_single_target_dataset(
+        ml_target_dir = os.path.join(ml_root_dir, target_col)
+        dl_target_dir = os.path.join(dl_root_dir, target_col)
+
+        ml_summary = export_single_target_dataset_ml(
             target_name=target_col,
             sample_df=selected_sample_df,
-            target_dir=target_dir,
+            target_dir=ml_target_dir,
+        )
+
+        dl_summary = export_single_target_dataset_dl(
+            target_name=target_col,
+            sample_df=selected_sample_df,
+            target_dir=dl_target_dir,
         )
 
         del selected_sample_df, valid_feature_cols, selected_cols
         force_gc(f"{target_col}::loop_end")
 
-        if summary is not None:
-            dataset_summaries.append(summary)
+        if ml_summary is not None:
+            dataset_summaries.append(ml_summary)
+        if dl_summary is not None:
+            dataset_summaries.append(dl_summary)
 
     return dataset_summaries
 
@@ -1155,9 +1239,12 @@ def main():
     log_step("统一数据处理脚本启动")
     log(f"merged.csv 输入路径: {paths['merged_input_path']}")
     log(f"Laboratory_data.csv 输入路径: {paths['lab_input_path']}")
-    log(f"最终输出目录: {paths['output_root_dir']}")
+    log(f"机器学习输出目录: {get_ml_root_dir()}")
+    log(f"深度学习输出目录: {get_dl_root_dir()}")
 
-    ensure_dir(paths["output_root_dir"])
+    ensure_dir(get_output_root_dir())
+    ensure_dir(get_ml_root_dir())
+    ensure_dir(get_dl_root_dir())
 
     merged_cleaned_df = clean_merged_data(paths["merged_input_path"])
     merged_interpolated_df = interpolate_merged_data(merged_cleaned_df)
@@ -1203,7 +1290,6 @@ def main():
         rt_indexed=rt_indexed,
         merged_with_target_df=merged_with_target_df,
         input_cols=input_cols,
-        output_root_dir=paths["output_root_dir"],
     )
 
     del rt_indexed, merged_with_target_df, input_cols
@@ -1214,11 +1300,13 @@ def main():
     log("1) merged.csv -> 清洗")
     log("2) cleaned merged.csv -> 插值")
     log("3) interpolated merged.csv + Laboratory_data.csv -> 目标对齐")
-    log("4) 每个目标单独：构造特征 -> 清洗缩容(去目标空行/全空特征列) -> XGBoost筛选 -> 导出")
-    log("5) 每个阶段结束立即释放内存")
-    log(f"成功输出目标数: {len(dataset_summaries)}")
+    log("4) 每个目标单独：构造特征 -> 清洗缩容 -> XGBoost筛选")
+    log("5) 同步导出两套数据：机器学习/深度学习")
+    log("6) 每个阶段结束立即释放内存")
+    log(f"成功输出数据集记录数(机器学习+深度学习): {len(dataset_summaries)}")
     log(f"总耗时: {time.time() - start_time:.2f} 秒")
 
 
 if __name__ == "__main__":
     main()
+
