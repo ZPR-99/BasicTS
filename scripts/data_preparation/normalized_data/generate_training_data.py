@@ -948,6 +948,20 @@ def build_temporal_feature_matrix(timestamp_series):
     timestamps = np.concatenate(feature_list, axis=1)
     return timestamps, desc
 
+def fit_dl_fill_values(train_df, feature_cols):
+    fill_values = train_df[feature_cols].median(numeric_only=True)
+    fill_values = fill_values.reindex(feature_cols)
+    fill_values = fill_values.fillna(0.0)
+    return fill_values
+
+
+def transform_features_for_dl(sub_df, feature_cols, fill_values):
+    x_df = sub_df[feature_cols].replace([np.inf, -np.inf], np.nan).copy()
+    x_df = x_df.fillna(fill_values)
+    x_df = x_df.fillna(0.0)
+    x = x_df.to_numpy(dtype=np.float32)
+    return x
+
 
 def split_dataframe_by_ratio(df, ratio_list):
     total = float(sum(ratio_list))
@@ -1124,13 +1138,96 @@ def export_single_target_dataset_ml(target_name, sample_df, target_dir):
 
 
 def export_single_target_dataset_dl(target_name, sample_df, target_dir):
-    return export_single_target_dataset_generic(
+    cfg = CONFIG["standardized_output"]
+    timestamp_col = get_timestamp_col()
+
+    ensure_dir(target_dir)
+
+    sample_df = sample_df.copy()
+    sample_df[timestamp_col] = pd.to_datetime(sample_df[timestamp_col], errors="coerce")
+    sample_df = sample_df.dropna(subset=[timestamp_col]).sort_values(timestamp_col).reset_index(drop=True)
+
+    if sample_df.empty:
+        log(f"{target_name}: 样本为空，跳过")
+        return None
+
+    feature_cols = [
+        c for c in sample_df.columns
+        if c not in [timestamp_col, target_name]
+    ]
+    feature_cols = deduplicate_preserve_order(feature_cols, context=f"{target_name}_深度学习_feature_cols")
+
+    if not feature_cols:
+        log(f"{target_name}: 无可用特征列，跳过")
+        return None
+
+    train_df, val_df, test_df, split_info = split_dataframe_by_ratio(sample_df, cfg["train_val_test_ratio"])
+
+    if len(train_df) == 0 or len(val_df) == 0 or len(test_df) == 0:
+        log(
+            f"{target_name}: 按比例切分后存在空集合 "
+            f"(train={len(train_df)}, val={len(val_df)}, test={len(test_df)})，跳过"
+        )
+        return None
+
+    fill_values = fit_dl_fill_values(train_df, feature_cols)
+
+    def to_xy_timestamps_dl(sub_df):
+        x = transform_features_for_dl(sub_df, feature_cols, fill_values)
+        y = pd.to_numeric(sub_df[target_name], errors="coerce").to_numpy(dtype=np.float32).reshape(-1, 1)
+        ts_features, ts_desc = build_temporal_feature_matrix(sub_df[timestamp_col])
+        return x, y, ts_features, ts_desc
+
+    train_x, train_y, train_ts, ts_desc = to_xy_timestamps_dl(train_df)
+    val_x, val_y, val_ts, _ = to_xy_timestamps_dl(val_df)
+    test_x, test_y, test_ts, _ = to_xy_timestamps_dl(test_df)
+
+    np.save(os.path.join(target_dir, "train_data.npy"), train_x)
+    np.save(os.path.join(target_dir, "val_data.npy"), val_x)
+    np.save(os.path.join(target_dir, "test_data.npy"), test_x)
+
+    np.save(os.path.join(target_dir, "train_label.npy"), train_y)
+    np.save(os.path.join(target_dir, "val_label.npy"), val_y)
+    np.save(os.path.join(target_dir, "test_label.npy"), test_y)
+
+    np.save(os.path.join(target_dir, "train_timestamps.npy"), train_ts)
+    np.save(os.path.join(target_dir, "val_timestamps.npy"), val_ts)
+    np.save(os.path.join(target_dir, "test_timestamps.npy"), test_ts)
+
+    meta = build_dataset_meta(
         target_name=target_name,
         sample_df=sample_df,
-        target_dir=target_dir,
+        feature_cols=feature_cols,
+        ts_desc=ts_desc,
+        split_info=split_info,
         task_type=CONFIG["standardized_output"]["dl_task_type"],
         consumer_name="深度学习",
     )
+    meta["preprocess"] = {
+        "nan_fill_method": "train_median_then_zero",
+    }
+
+    meta_path = os.path.join(target_dir, "meta.json")
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=4)
+
+    log(
+        f"{target_name}: 深度学习 数据集已输出到 {target_dir} | "
+        f"train/val/test = {split_info['train_len']}/{split_info['val_len']}/{split_info['test_len']}"
+    )
+
+    del train_df, val_df, test_df
+    del train_x, val_x, test_x, train_y, val_y, test_y, train_ts, val_ts, test_ts, fill_values
+    force_gc(f"export_single_target_dataset_dl::{target_name}")
+
+    return {
+        "target_name": target_name,
+        "target_dir": target_dir,
+        "num_samples": int(sample_df.shape[0]),
+        "num_features": int(len(feature_cols)),
+        "consumer": "深度学习",
+        "task_type": CONFIG["standardized_output"]["dl_task_type"],
+    }
 
 
 def process_targets_and_export(rt_indexed, merged_with_target_df, input_cols):
