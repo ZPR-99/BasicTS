@@ -90,7 +90,6 @@ CONFIG = {
 
     "sequence_output": {
         "predict_data_file": "predict_data.csv",
-        "sequence_subdir": "深度学习时序",
         "task_type": "sequence_regression_torch",
         "consumer": "深度学习时序",
         "domain": "二期磷酸",
@@ -835,26 +834,29 @@ def build_temporal_feature_matrix(timestamp_series):
     feature_list = []
     desc = []
 
+    # 关键修复：
+    # unix_timestamp_seconds 不能存成 float32，否则在 1e9 量级下分钟分辨率会丢失。
+    # 这里统一保持 float64，落盘时也保持 float64，不再二次压回 float32。
     unix_ts = (ts.astype("int64") // 10 ** 9).astype(np.int64)
-    feature_list.append(unix_ts.to_numpy().reshape(-1, 1).astype(np.float32))
+    feature_list.append(unix_ts.to_numpy().reshape(-1, 1).astype(np.float64))
     desc.append("unix_timestamp_seconds")
 
     if cfg["add_time_of_day"]:
         time_of_day = (ts.dt.hour * 60 + ts.dt.minute) / 1440.0
-        feature_list.append(time_of_day.to_numpy().reshape(-1, 1).astype(np.float32))
+        feature_list.append(time_of_day.to_numpy().reshape(-1, 1).astype(np.float64))
         desc.append("time_of_day")
 
     if cfg["add_day_of_week"]:
         day_of_week = ts.dt.dayofweek / 7.0
-        feature_list.append(day_of_week.to_numpy().reshape(-1, 1).astype(np.float32))
+        feature_list.append(day_of_week.to_numpy().reshape(-1, 1).astype(np.float64))
         desc.append("day_of_week")
 
     if cfg["add_month_of_year"]:
         month_of_year = (ts.dt.month - 1) / 12.0
-        feature_list.append(month_of_year.to_numpy().reshape(-1, 1).astype(np.float32))
+        feature_list.append(month_of_year.to_numpy().reshape(-1, 1).astype(np.float64))
         desc.append("month_of_year")
 
-    timestamps = np.concatenate(feature_list, axis=1)
+    timestamps = np.concatenate(feature_list, axis=1).astype(np.float64)
     return timestamps, desc
 
 
@@ -950,6 +952,10 @@ def build_single_target_sequence_samples(predict_df, target_col, input_cols):
         seq_cfg["train_val_test_ratio"]
     )
 
+    if len(train_ep) == 0 or len(val_ep) == 0 or len(test_ep) == 0:
+        log(f"{target_col}: 标签样本过少，切分后存在空集合，跳过")
+        return None
+
     stats = {
         "candidate_endpoints": int(len(endpoint_df)),
         "dropped_no_history": 0,
@@ -1017,19 +1023,22 @@ def build_single_target_sequence_samples(predict_df, target_col, input_cols):
 
             xs.append(x)
             ys.append(y[0])
-            x_ts_list.append(x_ts_features.astype(np.float32))
-            y_ts_list.append(y_ts_features.reshape(1, -1).astype(np.float32))
+
+            # 关键修复：
+            # 时间特征保持 float64，不能在这里再次压回 float32。
+            x_ts_list.append(x_ts_features.astype(np.float64))
+            y_ts_list.append(y_ts_features.reshape(1, -1).astype(np.float64))
 
         if xs:
             x_arr = np.stack(xs, axis=0).astype(np.float32)
             y_arr = np.stack(ys, axis=0).astype(np.float32)
-            x_ts_arr = np.stack(x_ts_list, axis=0).astype(np.float32)
-            y_ts_arr = np.stack(y_ts_list, axis=0).astype(np.float32)
+            x_ts_arr = np.stack(x_ts_list, axis=0).astype(np.float64)
+            y_ts_arr = np.stack(y_ts_list, axis=0).astype(np.float64)
         else:
             x_arr = np.empty((0, input_len, len(input_cols)), dtype=np.float32)
             y_arr = np.empty((0, 1, 1), dtype=np.float32)
-            x_ts_arr = np.empty((0, input_len, 0), dtype=np.float32)
-            y_ts_arr = np.empty((0, 1, 0), dtype=np.float32)
+            x_ts_arr = np.empty((0, input_len, 0), dtype=np.float64)
+            y_ts_arr = np.empty((0, 1, 0), dtype=np.float64)
 
         log(f"{target_col} | {subset_name}: endpoints={len(sub_endpoint_df)}, samples={len(x_arr)}")
         return x_arr, y_arr, x_ts_arr, y_ts_arr, ts_desc
@@ -1123,6 +1132,7 @@ def build_dataset_meta(target_name, sample_result):
             "min_valid_ratio": float(seq_cfg["min_valid_ratio"]),
             "require_continuous_window": bool(seq_cfg["require_continuous_window"]),
             "nan_fill_method": seq_cfg["nan_fill_method"],
+            "timestamps_dtype": "float64",
         },
         "build_stats": sample_result["stats"],
         "files": {
@@ -1298,9 +1308,11 @@ def main():
     log("4) interpolated merged.csv + cleaned Laboratory_data.csv -> 化验纠偏对齐 -> predict_data.csv")
     log("5) 基于 predict_data.csv，以目标非空时刻为终点切历史窗口")
     log("6) 导出真正的 sequence regression 数据集（不再导出表格回归数据）")
+    log("7) 时间特征中的 unix_timestamp_seconds 保持 float64，避免分钟级精度丢失")
     log(f"成功输出时序数据集目标数: {len(dataset_summaries)}")
     log(f"总耗时: {time.time() - start_time:.2f} 秒")
 
 
 if __name__ == "__main__":
     main()
+
