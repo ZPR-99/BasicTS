@@ -41,28 +41,6 @@ CONFIG = {
         "quantile_min_valid_count": 10,
     },
 
-    "lab_clean": {
-        "enabled": True,
-        "treat_zero_as_nan": True,
-        "drop_all_null_columns": True,
-        # 化验表可能存在同一时刻多条记录，默认不在清洗阶段去重，留到纠偏后按(target,timestamp)聚合
-        "drop_duplicate_timestamp": False,
-        "enable_rolling_sigma": True,
-        "sigma_window": "24h",
-        "sigma_min_periods": 5,
-        "sigma_multiplier": 3,
-        "enable_iqr": True,
-        "iqr_multiplier": 2.5,
-        "enable_median_pct_clip": False,
-        "median_pct_low": 0.5,
-        "median_pct_high": 0.5,
-        "median_pct_min_valid_count": 10,
-        "enable_quantile_clip": True,
-        "quantile_low": 0.001,
-        "quantile_high": 0.999,
-        "quantile_min_valid_count": 10,
-    },
-
     "rt_interpolation": {
         "threshold_ratio": 0.4,
         "max_gap_threshold": 120,
@@ -80,51 +58,32 @@ CONFIG = {
         "align_tol_min": 20,
     },
 
-    "sample_targets": [
-        "SO3",
-        "LF302_OCMJ",
-        "LF302_F4JL",
-        "LF302_DA43",
-        "LF302_S2YO"
-    ],
+    "forecasting_output": {
+        "save_source_csv": True,
+        "source_csv_name": "source_table.csv",
 
-    "sequence_output": {
-        "predict_data_file": "predict_data.csv",
-        "task_type": "sequence_regression_torch",
-        "consumer": "深度学习时序",
-        "domain": "二期磷酸",
-
-        # 历史窗口长度：分钟
-        "input_len": 120,
-
-        # 单目标单步输出
-        "output_len": 1,
-
-        # False 更稳妥：输入窗口截止到标签时刻前一分钟
-        "include_current_minute_in_input": False,
-
-        # 按标签时间顺序切分，避免泄露
+        # 参考 ETTh1 full-series 方式：整段连续序列切 train/val/test，不预切样本
         "train_val_test_ratio": [0.6, 0.2, 0.2],
 
-        # 窗口中允许的最大缺失比例（超过则丢弃）
-        "max_missing_ratio": 0.20,
+        # 供 BasicTSForecastingDataset 使用的滑窗参数，仅记录到 meta 中
+        "input_len": 12,
+        "output_len": 1,
 
-        # 只有窗口长度达到该比例的非空值时才保留
-        "min_valid_ratio": 0.80,
-
-        # 插值后仍可能有长停机段 NaN，要求窗口时间严格连续
-        "require_continuous_window": True,
-
-        # 导出前是否使用训练集统计量填充剩余 NaN
-        "nan_fill_method": "train_median_then_zero",
-
-        # 时间特征
+        # 时间特征，风格参考 ETTh1
         "add_time_of_day": True,
         "add_day_of_week": True,
-        "add_month_of_year": False,
+        "add_day_of_month": True,
+        "add_day_of_year": True,
 
-        "metrics": ["RMSE", "MAE", "MAPE", "R2", "TDA"],
+        # 数据集描述
+        "domain": "二期磷酸",
+        "task_type": "forecasting_full_series",
+        "consumer": "BasicTSForecastingDataset",
+        "metrics": ["MAE", "MSE"],
+        "norm_each_channel": True,
+        "rescale": False,
         "null_val": None,
+        "graph_file_path": None,
     },
 }
 
@@ -170,20 +129,16 @@ def get_lab_target_cols():
     return list(CONFIG["lab_targets"]["rule_hours"].keys())
 
 
-def get_sample_target_cols():
-    return list(CONFIG["sample_targets"])
-
-
 def get_output_root_dir():
     return CONFIG["paths"]["output_root_dir"]
 
 
-def get_sequence_root_dir():
+def get_dataset_root_dir():
     return get_output_root_dir()
 
 
-def get_predict_data_output_path():
-    return os.path.join(get_output_root_dir(), CONFIG["sequence_output"]["predict_data_file"])
+def get_target_dir(target_name):
+    return os.path.join(get_output_root_dir(), target_name)
 
 
 def sanitize_columns(df, context=""):
@@ -216,24 +171,6 @@ def ensure_unique_columns(df, context=""):
         dup_cols = pd.Index(df.columns)[dup_mask].tolist()
         raise ValueError(f"{context}发现重复列名: {dup_cols[:20]}")
     return df
-
-
-def deduplicate_preserve_order(cols, context=""):
-    seen = set()
-    unique_cols = []
-    dup_cols = []
-
-    for c in cols:
-        if c in seen:
-            dup_cols.append(c)
-            continue
-        seen.add(c)
-        unique_cols.append(c)
-
-    if dup_cols:
-        log(f"{context}检测到重复列名并已按首次出现保留（前20项）: {dup_cols[:20]}")
-
-    return unique_cols
 
 
 def parse_and_sort_timestamp(df, timestamp_col, floor_freq=None, drop_duplicate_timestamp=True, context=""):
@@ -493,35 +430,6 @@ def clean_merged_data(input_path):
     )
 
 
-def clean_lab_data(input_path):
-    if not os.path.exists(input_path):
-        raise FileNotFoundError(f"Laboratory_data.csv 输入文件不存在: {input_path}")
-
-    log_step("步骤2：读取并清洗 Laboratory_data.csv")
-    df = pd.read_csv(input_path, encoding=get_csv_encoding())
-
-    if not CONFIG["lab_clean"]["enabled"]:
-        df = sanitize_columns(df, context="Laboratory_data.csv")
-        df = ensure_unique_columns(df, context="Laboratory_data.csv")
-        df = parse_and_sort_timestamp(
-            df=df,
-            timestamp_col=get_timestamp_col(),
-            floor_freq=get_timestamp_floor_freq(),
-            drop_duplicate_timestamp=False,
-            context="Laboratory_data.csv",
-        )
-        for col in get_lab_target_cols():
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce", downcast="float")
-        return df
-
-    return clean_dataframe_by_config(
-        df=df,
-        clean_cfg=CONFIG["lab_clean"],
-        context_name="Laboratory_data.csv",
-    )
-
-
 def get_na_runs_mask(series, gap_threshold):
     is_na = series.isna()
 
@@ -553,7 +461,7 @@ def interpolate_merged_data(cleaned_df):
     threshold_ratio = CONFIG["rt_interpolation"]["threshold_ratio"]
     gap_threshold = CONFIG["rt_interpolation"]["max_gap_threshold"]
 
-    log_step("步骤3：对 cleaned merged.csv 做插值与补齐分钟时间轴")
+    log_step("步骤2：对 cleaned merged.csv 做插值与补齐分钟时间轴")
 
     df = cleaned_df.copy()
     df = sanitize_columns(df, context="cleaned merged.csv")
@@ -569,6 +477,9 @@ def interpolate_merged_data(cleaned_df):
     )
 
     df = df.set_index(timestamp_col).sort_index()
+
+    if df.empty:
+        raise ValueError("cleaned merged.csv 为空，无法执行插值。")
 
     full_index = pd.date_range(df.index.min(), df.index.max(), freq=get_time_frequency())
     missing_ts_count = int(len(full_index.difference(df.index)))
@@ -639,17 +550,21 @@ def prepare_rt_table_df(df):
     return df
 
 
-def prepare_lab_table_df(df):
-    timestamp_col = get_timestamp_col()
+def load_lab_data_without_cleaning(input_path):
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"Laboratory_data.csv 输入文件不存在: {input_path}")
 
-    df = sanitize_columns(df, context="清洗后的 Laboratory_data.csv")
-    df = ensure_unique_columns(df, context="清洗后的 Laboratory_data.csv")
+    log_step("步骤3：读取 Laboratory_data.csv（仅做时间解析与对齐准备，不做清洗）")
+
+    df = pd.read_csv(input_path, encoding=get_csv_encoding())
+    df = sanitize_columns(df, context="Laboratory_data.csv")
+    df = ensure_unique_columns(df, context="Laboratory_data.csv")
     df = parse_and_sort_timestamp(
         df=df,
-        timestamp_col=timestamp_col,
+        timestamp_col=get_timestamp_col(),
         floor_freq=get_timestamp_floor_freq(),
         drop_duplicate_timestamp=False,
-        context="清洗后的 Laboratory_data.csv"
+        context="Laboratory_data.csv",
     )
 
     for col in get_lab_target_cols():
@@ -690,6 +605,9 @@ def build_aligned_lab_long_table(lab_df):
     target_cols = [c for c in get_lab_target_cols() if c in lab_df.columns]
     timestamp_col = get_timestamp_col()
 
+    if not target_cols:
+        raise ValueError("Laboratory_data.csv 中未找到任何目标列，无法构造目标表。")
+
     lab_long = lab_df.melt(
         id_vars=[timestamp_col],
         value_vars=target_cols,
@@ -728,511 +646,268 @@ def build_aligned_lab_long_table(lab_df):
     return lab_long
 
 
-def attach_lab_by_target_asof(base_df, lab_long_df):
+def build_single_target_table(base_df, lab_long_df, target_name):
     timestamp_col = get_timestamp_col()
 
-    base_df = base_df.sort_values(timestamp_col).reset_index(drop=True)
-    final_df = base_df.copy()
+    sub = lab_long_df[lab_long_df["target_name"] == target_name].copy()
+    if sub.empty:
+        log(f"{target_name}: 纠偏后无有效样本，跳过建表")
+        return None
+
+    sub = sub[[timestamp_col, "y"]].rename(columns={"y": target_name})
+    sub = sub.sort_values(timestamp_col).reset_index(drop=True)
 
     feature_lookup = base_df[[timestamp_col]].copy()
     feature_lookup = feature_lookup.rename(columns={timestamp_col: "feature_timestamp"})
     feature_lookup["lookup_ts"] = feature_lookup["feature_timestamp"]
     feature_lookup = feature_lookup.sort_values("lookup_ts").reset_index(drop=True)
 
-    target_names = sorted(lab_long_df["target_name"].unique().tolist())
+    left_df = sub.rename(columns={timestamp_col: "lookup_ts"})
+    mapped = pd.merge_asof(
+        left_df.sort_values("lookup_ts"),
+        feature_lookup,
+        on="lookup_ts",
+        direction="backward",
+        allow_exact_matches=True,
+    )
 
-    for target_name in target_names:
-        sub = lab_long_df[lab_long_df["target_name"] == target_name].copy()
-        if sub.empty:
-            continue
+    before_cnt = int(sub[target_name].notna().sum())
+    unmatched_cnt = int(mapped["feature_timestamp"].isna().sum())
+    if unmatched_cnt > 0:
+        log(f"{target_name}: 有 {unmatched_cnt} 条纠偏后样本未找到可落点的分钟表时间，将被丢弃")
 
-        sub = sub[[timestamp_col, "y"]].rename(columns={"y": target_name})
-        sub = sub.sort_values(timestamp_col).reset_index(drop=True)
+    mapped = mapped.dropna(subset=["feature_timestamp"]).copy()
+    if mapped.empty:
+        log(f"{target_name}: 未成功插入任何样本，跳过建表")
+        del sub, feature_lookup, left_df, mapped
+        force_gc(f"build_single_target_table::{target_name}::empty")
+        return None
 
-        left_df = sub.rename(columns={timestamp_col: "lookup_ts"})
+    mapped = mapped.rename(columns={"feature_timestamp": timestamp_col})
+    mapped = mapped[[timestamp_col, target_name]]
 
-        mapped = pd.merge_asof(
-            left_df.sort_values("lookup_ts"),
-            feature_lookup,
-            on="lookup_ts",
-            direction="backward",
-            allow_exact_matches=True,
-        )
+    dup_cnt = int(mapped.duplicated(subset=[timestamp_col]).sum())
+    if dup_cnt > 0:
+        log(f"{target_name}: 有 {dup_cnt} 条样本落到相同分钟行，将按均值聚合")
+        mapped = mapped.groupby(timestamp_col, as_index=False)[target_name].mean()
+    else:
+        mapped = mapped.sort_values(timestamp_col).reset_index(drop=True)
 
-        before_cnt = int(sub[target_name].notna().sum())
-        unmatched_cnt = int(mapped["feature_timestamp"].isna().sum())
+    after_cnt = int(mapped[target_name].notna().sum())
+    log(f"{target_name}: 纠偏后样本数={before_cnt}, 成功插入样本数={after_cnt}")
 
-        if unmatched_cnt > 0:
-            log(f"{target_name}: 有 {unmatched_cnt} 条纠偏后样本未找到可落点的分钟表时间，将被丢弃")
+    final_df = base_df.merge(mapped, on=timestamp_col, how="left")
+    final_df = ensure_unique_columns(final_df, context=f"{target_name} 单目标表")
 
-        mapped = mapped.dropna(subset=["feature_timestamp"]).copy()
-        if mapped.empty:
-            log(f"{target_name}: 未成功插入任何样本")
-            continue
+    before_rows = len(final_df)
+    final_df = final_df.dropna(subset=[target_name], how="any").reset_index(drop=True)
+    removed_rows = before_rows - len(final_df)
+    log(f"{target_name}: 按‘当前目标为空就删除’规则移除行数: {removed_rows}")
 
-        mapped = mapped.rename(columns={"feature_timestamp": timestamp_col})
-        mapped = mapped[[timestamp_col, target_name]]
+    keep_cols = [timestamp_col] + [c for c in base_df.columns if c != timestamp_col] + [target_name]
+    final_df = final_df[keep_cols].copy()
+    final_df = final_df.sort_values(timestamp_col).reset_index(drop=True)
 
-        dup_cnt = int(mapped.duplicated(subset=[timestamp_col]).sum())
-        if dup_cnt > 0:
-            log(f"{target_name}: 有 {dup_cnt} 条样本落到相同分钟行，将按均值聚合")
-            mapped = mapped.groupby(timestamp_col, as_index=False)[target_name].mean()
-        else:
-            mapped = mapped.sort_values(timestamp_col).reset_index(drop=True)
-
-        after_cnt = int(mapped[target_name].notna().sum())
-        log(f"{target_name}: 纠偏后样本数={before_cnt}, 成功插入样本数={after_cnt}")
-
-        final_df = final_df.merge(mapped, on=timestamp_col, how="left")
-        final_df = ensure_unique_columns(final_df, context=f"{target_name} 合并后 predict_data")
-
-        del sub, left_df, mapped
-        force_gc(f"attach_lab_by_target_asof::{target_name}")
-
-    del feature_lookup
-    force_gc("attach_lab_by_target_asof")
+    del sub, feature_lookup, left_df, mapped
+    force_gc(f"build_single_target_table::{target_name}")
     return final_df
 
 
-def select_input_columns_from_predict_data(predict_df):
-    timestamp_col = get_timestamp_col()
-    target_cols = [c for c in get_lab_target_cols() if c in predict_df.columns]
+def infer_frequency_minutes(ts_series):
+    ts = pd.to_datetime(pd.Series(ts_series), errors="coerce").dropna().sort_values().reset_index(drop=True)
+    if len(ts) < 2:
+        return None, False
 
-    cols = []
-    all_null_cols = []
+    diff_minutes = ts.diff().dropna().dt.total_seconds() / 60.0
+    diff_minutes = diff_minutes[diff_minutes > 0]
+    if len(diff_minutes) == 0:
+        return None, False
 
-    for c in predict_df.columns:
-        if c == timestamp_col:
-            continue
-        if c in target_cols:
-            continue
-
-        if predict_df[c].notna().sum() == 0:
-            all_null_cols.append(c)
-            continue
-
-        cols.append(c)
-
-    cols = deduplicate_preserve_order(cols, context="predict_input_cols")
-
-    log(f"原始点位总数（不含时间和目标）: {len(cols) + len(all_null_cols)}")
-    log(f"最终保留序列输入点位数: {len(cols)}")
-
-    if all_null_cols:
-        log(f"以下原始点位全为空，已跳过（前50项）: {all_null_cols[:50]}")
-
-    return cols
+    freq_minutes = int(round(diff_minutes.mode().iloc[0]))
+    is_regular = bool((diff_minutes.round().astype(int) == freq_minutes).all())
+    return freq_minutes, is_regular
 
 
-def build_temporal_feature_matrix(timestamp_series):
-    cfg = CONFIG["sequence_output"]
+def add_temporal_features(df):
+    cfg = CONFIG["forecasting_output"]
+    ts = pd.to_datetime(df[get_timestamp_col()], errors="coerce")
 
-    ts = pd.to_datetime(timestamp_series, errors="coerce")
-    if ts.isna().any():
-        raise ValueError("时间序列存在无法解析的时间戳，无法生成标准化时间特征。")
-
-    feature_list = []
+    timestamps = []
     desc = []
 
-    # 关键修复：
-    # unix_timestamp_seconds 不能存成 float32，否则在 1e9 量级下分钟分辨率会丢失。
-    # 这里统一保持 float64，落盘时也保持 float64，不再二次压回 float32。
-    unix_ts = (ts.astype("int64") // 10 ** 9).astype(np.int64)
-    feature_list.append(unix_ts.to_numpy().reshape(-1, 1).astype(np.float64))
-    desc.append("unix_timestamp_seconds")
-
     if cfg["add_time_of_day"]:
-        time_of_day = (ts.dt.hour * 60 + ts.dt.minute) / 1440.0
-        feature_list.append(time_of_day.to_numpy().reshape(-1, 1).astype(np.float64))
+        tod = ((ts.dt.hour * 60 + ts.dt.minute) / 1440.0).to_numpy()
+        timestamps.append(tod)
         desc.append("time_of_day")
 
     if cfg["add_day_of_week"]:
-        day_of_week = ts.dt.dayofweek / 7.0
-        feature_list.append(day_of_week.to_numpy().reshape(-1, 1).astype(np.float64))
+        dow = (ts.dt.dayofweek / 7.0).to_numpy()
+        timestamps.append(dow)
         desc.append("day_of_week")
 
-    if cfg["add_month_of_year"]:
-        month_of_year = (ts.dt.month - 1) / 12.0
-        feature_list.append(month_of_year.to_numpy().reshape(-1, 1).astype(np.float64))
-        desc.append("month_of_year")
+    if cfg["add_day_of_month"]:
+        dom = ((ts.dt.day - 1) / 31.0).to_numpy()
+        timestamps.append(dom)
+        desc.append("day_of_month")
 
-    timestamps = np.concatenate(feature_list, axis=1).astype(np.float64)
+    if cfg["add_day_of_year"]:
+        doy = ((ts.dt.dayofyear - 1) / 366.0).to_numpy()
+        timestamps.append(doy)
+        desc.append("day_of_year")
+
+    if len(timestamps) == 0:
+        raise ValueError("未启用任何时间特征，timestamps 为空。")
+
+    timestamps = np.stack(timestamps, axis=-1).astype(np.float32)
     return timestamps, desc
 
 
-def split_dataframe_by_ratio(df, ratio_list):
+def split_full_series(data, timestamps, ratio_list):
     total = float(sum(ratio_list))
     norm_ratios = [x / total for x in ratio_list]
 
-    n = len(df)
+    n = data.shape[0]
     train_len = int(n * norm_ratios[0])
     val_len = int(n * norm_ratios[1])
     test_len = n - train_len - val_len
 
-    train_df = df.iloc[:train_len].copy().reset_index(drop=True)
-    val_df = df.iloc[train_len: train_len + val_len].copy().reset_index(drop=True)
-    test_df = df.iloc[train_len + val_len:].copy().reset_index(drop=True)
+    train_data = data[:train_len].astype(np.float32)
+    val_data = data[train_len: train_len + val_len].astype(np.float32)
+    test_data = data[train_len + val_len:].astype(np.float32)
 
-    return train_df, val_df, test_df, {
-        "train_len": train_len,
-        "val_len": val_len,
-        "test_len": test_len,
-        "normalized_ratio": norm_ratios,
-    }
-
-
-def check_window_continuity(window_ts):
-    if len(window_ts) <= 1:
-        return True
-
-    expected_delta = pd.to_timedelta(get_time_frequency())
-    deltas = window_ts.diff().dropna()
-    return bool((deltas == expected_delta).all())
-
-
-def calc_train_fill_values(train_x):
-    if train_x.size == 0:
-        return None
-
-    flat_x = train_x.reshape(-1, train_x.shape[-1]).astype(np.float32)
-    fill_values = np.nanmedian(flat_x, axis=0)
-
-    if np.isscalar(fill_values):
-        fill_values = np.array([fill_values], dtype=np.float32)
-
-    fill_values = np.where(np.isnan(fill_values), 0.0, fill_values).astype(np.float32)
-    return fill_values
-
-
-def apply_fill_values_to_3d_array(x_arr, fill_values):
-    if x_arr.size == 0:
-        return x_arr
-
-    if fill_values is None:
-        return np.where(np.isnan(x_arr), 0.0, x_arr).astype(np.float32)
-
-    out = x_arr.copy()
-    nan_mask = np.isnan(out)
-    if nan_mask.any():
-        for f_idx in range(out.shape[-1]):
-            feature_nan_mask = nan_mask[:, :, f_idx]
-            if feature_nan_mask.any():
-                out[:, :, f_idx][feature_nan_mask] = fill_values[f_idx]
-        out = np.where(np.isnan(out), 0.0, out)
-
-    return out.astype(np.float32)
-
-
-def build_single_target_sequence_samples(predict_df, target_col, input_cols):
-    timestamp_col = get_timestamp_col()
-    seq_cfg = CONFIG["sequence_output"]
-
-    input_len = int(seq_cfg["input_len"])
-    output_len = int(seq_cfg["output_len"])
-    include_current = bool(seq_cfg["include_current_minute_in_input"])
-    max_missing_ratio = float(seq_cfg["max_missing_ratio"])
-    min_valid_ratio = float(seq_cfg["min_valid_ratio"])
-    require_continuous = bool(seq_cfg["require_continuous_window"])
-
-    if output_len != 1:
-        raise ValueError("当前脚本仅支持单步标签输出，请将 CONFIG['sequence_output']['output_len'] 设为 1。")
-
-    work_df = predict_df[[timestamp_col] + input_cols + [target_col]].copy()
-    work_df = work_df.sort_values(timestamp_col).reset_index(drop=True)
-
-    endpoint_df = work_df.loc[work_df[target_col].notna(), [timestamp_col, target_col]].copy()
-    endpoint_df = endpoint_df.sort_values(timestamp_col).reset_index(drop=True)
-
-    if endpoint_df.empty:
-        return None
-
-    time_to_index = pd.Series(work_df.index.to_numpy(), index=work_df[timestamp_col]).to_dict()
-    train_ep, val_ep, test_ep, split_info = split_dataframe_by_ratio(
-        endpoint_df,
-        seq_cfg["train_val_test_ratio"]
-    )
-
-    if len(train_ep) == 0 or len(val_ep) == 0 or len(test_ep) == 0:
-        log(f"{target_col}: 标签样本过少，切分后存在空集合，跳过")
-        return None
-
-    stats = {
-        "candidate_endpoints": int(len(endpoint_df)),
-        "dropped_no_history": 0,
-        "dropped_not_continuous": 0,
-        "dropped_missing_ratio": 0,
-        "dropped_low_valid_ratio": 0,
-        "built_samples": 0,
-    }
-
-    def build_subset_samples(sub_endpoint_df, subset_name):
-        xs = []
-        ys = []
-        x_ts_list = []
-        y_ts_list = []
-        ts_desc = []
-
-        for _, row in sub_endpoint_df.iterrows():
-            label_ts = row[timestamp_col]
-            label_val = float(row[target_col])
-
-            label_idx = time_to_index.get(label_ts, None)
-            if label_idx is None:
-                stats["dropped_no_history"] += 1
-                continue
-
-            if include_current:
-                end_idx = label_idx
-                start_idx = end_idx - input_len + 1
-            else:
-                end_idx = label_idx - 1
-                start_idx = end_idx - input_len + 1
-
-            if start_idx < 0 or end_idx < start_idx:
-                stats["dropped_no_history"] += 1
-                continue
-
-            window_df = work_df.iloc[start_idx: end_idx + 1].copy()
-            if len(window_df) != input_len:
-                stats["dropped_no_history"] += 1
-                continue
-
-            if require_continuous and (not check_window_continuity(window_df[timestamp_col])):
-                stats["dropped_not_continuous"] += 1
-                continue
-
-            x_df = window_df[input_cols].copy()
-            total_cells = int(x_df.shape[0] * x_df.shape[1])
-            valid_cells = int(x_df.notna().sum().sum())
-            valid_ratio = valid_cells / total_cells if total_cells > 0 else 0.0
-            missing_ratio = 1.0 - valid_ratio
-
-            if missing_ratio > max_missing_ratio:
-                stats["dropped_missing_ratio"] += 1
-                continue
-
-            if valid_ratio < min_valid_ratio:
-                stats["dropped_low_valid_ratio"] += 1
-                continue
-
-            x = x_df.to_numpy(dtype=np.float32)
-            y = np.array([[[label_val]]], dtype=np.float32)
-
-            x_ts_features, ts_desc = build_temporal_feature_matrix(window_df[timestamp_col])
-            y_ts_features, _ = build_temporal_feature_matrix(pd.Series([label_ts]))
-
-            xs.append(x)
-            ys.append(y[0])
-
-            # 关键修复：
-            # 时间特征保持 float64，不能在这里再次压回 float32。
-            x_ts_list.append(x_ts_features.astype(np.float64))
-            y_ts_list.append(y_ts_features.reshape(1, -1).astype(np.float64))
-
-        if xs:
-            x_arr = np.stack(xs, axis=0).astype(np.float32)
-            y_arr = np.stack(ys, axis=0).astype(np.float32)
-            x_ts_arr = np.stack(x_ts_list, axis=0).astype(np.float64)
-            y_ts_arr = np.stack(y_ts_list, axis=0).astype(np.float64)
-        else:
-            x_arr = np.empty((0, input_len, len(input_cols)), dtype=np.float32)
-            y_arr = np.empty((0, 1, 1), dtype=np.float32)
-            x_ts_arr = np.empty((0, input_len, 0), dtype=np.float64)
-            y_ts_arr = np.empty((0, 1, 0), dtype=np.float64)
-
-        log(f"{target_col} | {subset_name}: endpoints={len(sub_endpoint_df)}, samples={len(x_arr)}")
-        return x_arr, y_arr, x_ts_arr, y_ts_arr, ts_desc
-
-    train_x, train_y, train_ts, train_label_ts, ts_desc = build_subset_samples(train_ep, "train")
-    val_x, val_y, val_ts, val_label_ts, _ = build_subset_samples(val_ep, "val")
-    test_x, test_y, test_ts, test_label_ts, _ = build_subset_samples(test_ep, "test")
-
-    fill_method = seq_cfg["nan_fill_method"]
-    if fill_method == "train_median_then_zero":
-        fill_values = calc_train_fill_values(train_x)
-        train_x = apply_fill_values_to_3d_array(train_x, fill_values)
-        val_x = apply_fill_values_to_3d_array(val_x, fill_values)
-        test_x = apply_fill_values_to_3d_array(test_x, fill_values)
-    elif fill_method == "zero":
-        train_x = apply_fill_values_to_3d_array(train_x, np.zeros(train_x.shape[-1], dtype=np.float32) if train_x.size > 0 else None)
-        val_x = apply_fill_values_to_3d_array(val_x, np.zeros(val_x.shape[-1], dtype=np.float32) if val_x.size > 0 else None)
-        test_x = apply_fill_values_to_3d_array(test_x, np.zeros(test_x.shape[-1], dtype=np.float32) if test_x.size > 0 else None)
-    elif fill_method in [None, "", "keep_nan"]:
-        pass
-    else:
-        raise ValueError(f"不支持的 nan_fill_method: {fill_method}")
-
-    stats["built_samples"] = int(len(train_x) + len(val_x) + len(test_x))
+    train_timestamps = timestamps[:train_len].astype(np.float32)
+    val_timestamps = timestamps[train_len: train_len + val_len].astype(np.float32)
+    test_timestamps = timestamps[train_len + val_len:].astype(np.float32)
 
     return {
-        "target_col": target_col,
-        "input_cols": input_cols,
-        "split_info": split_info,
-        "stats": stats,
-        "ts_desc": ts_desc,
-        "train": {
-            "x": train_x,
-            "y": train_y,
-            "x_ts": train_ts,
-            "y_ts": train_label_ts,
-        },
-        "val": {
-            "x": val_x,
-            "y": val_y,
-            "x_ts": val_ts,
-            "y_ts": val_label_ts,
-        },
-        "test": {
-            "x": test_x,
-            "y": test_y,
-            "x_ts": test_ts,
-            "y_ts": test_label_ts,
-        },
-    }
-
-
-def build_dataset_meta(target_name, sample_result):
-    seq_cfg = CONFIG["sequence_output"]
-
-    num_samples = int(
-        len(sample_result["train"]["x"]) +
-        len(sample_result["val"]["x"]) +
-        len(sample_result["test"]["x"])
-    )
-
-    return {
-        "name": target_name,
-        "domain": seq_cfg["domain"],
-        "task_type": seq_cfg["task_type"],
-        "consumer": seq_cfg["consumer"],
-        "frequency": get_time_frequency(),
-        "sample_mode": "endpoint_sequence_to_one",
-        "target_name": target_name,
-        "input_len": int(seq_cfg["input_len"]),
-        "output_len": int(seq_cfg["output_len"]),
-        "include_current_minute_in_input": bool(seq_cfg["include_current_minute_in_input"]),
-        "num_samples": num_samples,
-        "num_features": int(len(sample_result["input_cols"])),
-        "num_timestamp_features": int(len(sample_result["ts_desc"])),
-        "feature_columns": list(sample_result["input_cols"]),
-        "timestamps_description": list(sample_result["ts_desc"]),
+        "train_data": train_data,
+        "val_data": val_data,
+        "test_data": test_data,
+        "train_timestamps": train_timestamps,
+        "val_timestamps": val_timestamps,
+        "test_timestamps": test_timestamps,
         "split": {
-            "train_len": int(len(sample_result["train"]["x"])),
-            "val_len": int(len(sample_result["val"]["x"])),
-            "test_len": int(len(sample_result["test"]["x"])),
-            "train_val_test_ratio": [float(x) for x in sample_result["split_info"]["normalized_ratio"]],
-        },
+            "train_len": int(train_len),
+            "val_len": int(val_len),
+            "test_len": int(test_len),
+            "train_val_test_ratio": [float(x) for x in norm_ratios],
+        }
+    }
+
+
+def build_forecasting_meta(target_name, source_df, data, timestamps, ts_desc, split_info, inferred_freq_minutes, is_regular):
+    cfg = CONFIG["forecasting_output"]
+    feature_columns = [c for c in source_df.columns if c != get_timestamp_col()]
+    target_channel = [len(feature_columns) - 1]
+
+    meta = {
+        "name": target_name,
+        "domain": cfg["domain"],
+        "task_type": cfg["task_type"],
+        "consumer": cfg["consumer"],
+        "timestamp_col": get_timestamp_col(),
+        "target_name": target_name,
+        "target_channel": target_channel,
+        "input_len": int(cfg["input_len"]),
+        "output_len": int(cfg["output_len"]),
+        "frequency_minutes": inferred_freq_minutes,
+        "is_regular_frequency": is_regular,
+        "shape": [int(data.shape[0]), int(data.shape[1])],
+        "timestamps_shape": [int(timestamps.shape[0]), int(timestamps.shape[1])],
+        "timestamps_description": list(ts_desc),
+        "num_time_steps": int(data.shape[0]),
+        "num_vars": int(data.shape[1]),
+        "feature_columns": feature_columns,
+        "has_graph": cfg["graph_file_path"] is not None,
+        "split": split_info,
         "regular_settings": {
-            "train_val_test_ratio": [float(x) for x in sample_result["split_info"]["normalized_ratio"]],
-            "norm_each_channel": False,
-            "rescale": False,
-            "metrics": seq_cfg["metrics"],
-            "null_val": seq_cfg["null_val"],
-            "max_missing_ratio": float(seq_cfg["max_missing_ratio"]),
-            "min_valid_ratio": float(seq_cfg["min_valid_ratio"]),
-            "require_continuous_window": bool(seq_cfg["require_continuous_window"]),
-            "nan_fill_method": seq_cfg["nan_fill_method"],
-            "timestamps_dtype": "float64",
+            "train_val_test_ratio": split_info["train_val_test_ratio"],
+            "norm_each_channel": bool(cfg["norm_each_channel"]),
+            "rescale": bool(cfg["rescale"]),
+            "metrics": list(cfg["metrics"]),
+            "null_val": cfg["null_val"],
         },
-        "build_stats": sample_result["stats"],
         "files": {
             "train_data": "train_data.npy",
             "val_data": "val_data.npy",
             "test_data": "test_data.npy",
-            "train_label": "train_label.npy",
-            "val_label": "val_label.npy",
-            "test_label": "test_label.npy",
             "train_timestamps": "train_timestamps.npy",
             "val_timestamps": "val_timestamps.npy",
             "test_timestamps": "test_timestamps.npy",
-            "train_label_timestamps": "train_label_timestamps.npy",
-            "val_label_timestamps": "val_label_timestamps.npy",
-            "test_label_timestamps": "test_label_timestamps.npy",
+            "source_table_csv": CONFIG["forecasting_output"]["source_csv_name"] if CONFIG["forecasting_output"]["save_source_csv"] else None,
         },
+        "notes": [
+            "该目录按 ETTh1 风格导出为 full-series forecasting 数据集。",
+            "train/val/test 保存的是整段连续序列，而不是预切窗样本。",
+            "目标列位于 feature_columns 的最后一列，可用 target_channel 定位。",
+            "如果时间间隔并非严格规则，BasicTSForecastingDataset 仍按行滑窗；是否进一步规则化可在后续版本处理。",
+        ],
     }
+    return meta
 
 
-def save_single_target_sequence_dataset(sample_result):
-    target_name = sample_result["target_col"]
-    target_dir = os.path.join(get_sequence_root_dir(), target_name)
+def save_forecasting_dataset(target_name, target_df):
+    target_dir = get_target_dir(target_name)
     ensure_dir(target_dir)
 
-    np.save(os.path.join(target_dir, "train_data.npy"), sample_result["train"]["x"])
-    np.save(os.path.join(target_dir, "val_data.npy"), sample_result["val"]["x"])
-    np.save(os.path.join(target_dir, "test_data.npy"), sample_result["test"]["x"])
+    if CONFIG["forecasting_output"]["save_source_csv"]:
+        target_df.to_csv(
+            os.path.join(target_dir, CONFIG["forecasting_output"]["source_csv_name"]),
+            index=False,
+            encoding=get_csv_encoding()
+        )
 
-    np.save(os.path.join(target_dir, "train_label.npy"), sample_result["train"]["y"])
-    np.save(os.path.join(target_dir, "val_label.npy"), sample_result["val"]["y"])
-    np.save(os.path.join(target_dir, "test_label.npy"), sample_result["test"]["y"])
+    data_df = target_df[[c for c in target_df.columns if c != get_timestamp_col()]].copy()
+    data = data_df.to_numpy(dtype=np.float32)
 
-    np.save(os.path.join(target_dir, "train_timestamps.npy"), sample_result["train"]["x_ts"])
-    np.save(os.path.join(target_dir, "val_timestamps.npy"), sample_result["val"]["x_ts"])
-    np.save(os.path.join(target_dir, "test_timestamps.npy"), sample_result["test"]["x_ts"])
+    timestamps, ts_desc = add_temporal_features(target_df)
+    inferred_freq_minutes, is_regular = infer_frequency_minutes(target_df[get_timestamp_col()])
 
-    np.save(os.path.join(target_dir, "train_label_timestamps.npy"), sample_result["train"]["y_ts"])
-    np.save(os.path.join(target_dir, "val_label_timestamps.npy"), sample_result["val"]["y_ts"])
-    np.save(os.path.join(target_dir, "test_label_timestamps.npy"), sample_result["test"]["y_ts"])
+    split_result = split_full_series(
+        data=data,
+        timestamps=timestamps,
+        ratio_list=CONFIG["forecasting_output"]["train_val_test_ratio"],
+    )
 
-    meta = build_dataset_meta(target_name, sample_result)
+    np.save(os.path.join(target_dir, "train_data.npy"), split_result["train_data"])
+    np.save(os.path.join(target_dir, "val_data.npy"), split_result["val_data"])
+    np.save(os.path.join(target_dir, "test_data.npy"), split_result["test_data"])
+
+    np.save(os.path.join(target_dir, "train_timestamps.npy"), split_result["train_timestamps"])
+    np.save(os.path.join(target_dir, "val_timestamps.npy"), split_result["val_timestamps"])
+    np.save(os.path.join(target_dir, "test_timestamps.npy"), split_result["test_timestamps"])
+
+    meta = build_forecasting_meta(
+        target_name=target_name,
+        source_df=target_df,
+        data=data,
+        timestamps=timestamps,
+        ts_desc=ts_desc,
+        split_info=split_result["split"],
+        inferred_freq_minutes=inferred_freq_minutes,
+        is_regular=is_regular,
+    )
+
     with open(os.path.join(target_dir, "meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=4)
 
+    log(f"{target_name}: forecasting 数据集已保存到 {target_dir}")
     log(
-        f"{target_name}: 深度学习时序数据集已输出到 {target_dir} | "
-        f"train/val/test = "
-        f"{len(sample_result['train']['x'])}/"
-        f"{len(sample_result['val']['x'])}/"
-        f"{len(sample_result['test']['x'])}"
+        f"{target_name}: train/val/test = "
+        f"{split_result['split']['train_len']}/"
+        f"{split_result['split']['val_len']}/"
+        f"{split_result['split']['test_len']}"
     )
+    log(f"{target_name}: inferred_frequency_minutes = {inferred_freq_minutes}, is_regular_frequency = {is_regular}")
 
     return {
         "target_name": target_name,
         "target_dir": target_dir,
-        "num_samples": meta["num_samples"],
-        "num_features": meta["num_features"],
-        "task_type": meta["task_type"],
-        "consumer": meta["consumer"],
+        "num_time_steps": int(data.shape[0]),
+        "num_vars": int(data.shape[1]),
+        "inferred_frequency_minutes": inferred_freq_minutes,
+        "is_regular_frequency": is_regular,
     }
-
-
-def process_targets_and_export_sequence(predict_df, input_cols):
-    dataset_summaries = []
-
-    log_step("步骤6：按目标逐个构建时序样本并导出")
-
-    for target_col in get_sample_target_cols():
-        if target_col not in predict_df.columns:
-            log(f"警告：predict_data 中不存在目标列 {target_col}，跳过")
-            continue
-
-        sample_count = int(predict_df[target_col].notna().sum())
-        if sample_count == 0:
-            log(f"{target_col}: 无目标样本，跳过")
-            continue
-
-        log_step(f"{target_col}：开始构建时序样本")
-        sample_result = build_single_target_sequence_samples(
-            predict_df=predict_df,
-            target_col=target_col,
-            input_cols=input_cols,
-        )
-
-        if sample_result is None:
-            log(f"{target_col}: 样本构建失败，跳过")
-            continue
-
-        if sample_result["stats"]["built_samples"] == 0:
-            log(f"{target_col}: 未构建出有效样本，跳过")
-            log(f"{target_col} 样本构建统计: {sample_result['stats']}")
-            continue
-
-        summary = save_single_target_sequence_dataset(sample_result)
-        dataset_summaries.append(summary)
-
-        log(f"{target_col} 样本构建统计: {sample_result['stats']}")
-        force_gc(f"{target_col}::process_targets_and_export_sequence")
-
-    return dataset_summaries
 
 
 def main():
@@ -1240,76 +915,82 @@ def main():
     paths = CONFIG["paths"]
     timestamp_col = get_timestamp_col()
 
-    log_step("统一数据处理脚本启动")
+    log_step("统一数据处理脚本启动（ETTh1 风格 forecasting 数据集导出）")
     log(f"merged.csv 输入路径: {paths['merged_input_path']}")
     log(f"Laboratory_data.csv 输入路径: {paths['lab_input_path']}")
-    log(f"predict_data.csv 输出路径: {get_predict_data_output_path()}")
-    log(f"深度学习时序输出目录: {get_sequence_root_dir()}")
+    log(f"forecasting 输出目录: {get_dataset_root_dir()}")
 
     ensure_dir(get_output_root_dir())
-    ensure_dir(get_sequence_root_dir())
+    ensure_dir(get_dataset_root_dir())
 
     merged_cleaned_df = clean_merged_data(paths["merged_input_path"])
-    lab_cleaned_df = clean_lab_data(paths["lab_input_path"])
     merged_interpolated_df = interpolate_merged_data(merged_cleaned_df)
 
     del merged_cleaned_df
     force_gc("main::after_interpolate")
 
-    log_step("步骤4：使用插值后的 merged.csv + Laboratory_data.csv 构造 predict_data 总表")
     rt_df = prepare_rt_table_df(merged_interpolated_df)
-    lab_df = prepare_lab_table_df(lab_cleaned_df)
+    del merged_interpolated_df
+    force_gc("main::after_prepare_rt")
 
-    del merged_interpolated_df, lab_cleaned_df
-    force_gc("main::after_prepare_tables")
-
+    lab_df = load_lab_data_without_cleaning(paths["lab_input_path"])
     log(f"插值后 merged.csv 形状: {rt_df.shape[0]} 行 x {rt_df.shape[1]} 列")
-    log(f"清洗后 Laboratory_data.csv 形状: {lab_df.shape[0]} 行 x {lab_df.shape[1]} 列")
+    log(f"Laboratory_data.csv 形状: {lab_df.shape[0]} 行 x {lab_df.shape[1]} 列")
 
+    log_step("步骤4：构造对齐后的化验长表")
     lab_long_df = build_aligned_lab_long_table(lab_df)
     del lab_df
     force_gc("main::after_build_lab_long")
 
-    predict_df = attach_lab_by_target_asof(
-        base_df=rt_df,
-        lab_long_df=lab_long_df,
-    )
-    del lab_long_df, rt_df
-    force_gc("main::after_attach_lab")
+    log_step("步骤5：按目标逐个生成单目标表 -> forecasting full-series 数据集")
+    saved_targets = []
+    feature_cols = [c for c in rt_df.columns if c != timestamp_col]
+    log(f"当前分钟级特征列数: {len(feature_cols)}")
 
-    predict_df = ensure_unique_columns(predict_df, context="predict_data")
-    predict_df = predict_df.sort_values(timestamp_col).reset_index(drop=True)
+    for target_name in get_lab_target_cols():
+        log_step(f"{target_name}：开始生成 forecasting 数据集")
 
-    for c in [x for x in get_lab_target_cols() if x in predict_df.columns]:
-        log(f"{c} 非空样本数: {int(predict_df[c].notna().sum())}")
+        target_df = build_single_target_table(
+            base_df=rt_df,
+            lab_long_df=lab_long_df,
+            target_name=target_name,
+        )
 
-    predict_data_output_path = get_predict_data_output_path()
-    predict_df.to_csv(predict_data_output_path, index=False, encoding=get_csv_encoding())
-    log(f"predict_data.csv 已保存: {predict_data_output_path}")
+        if target_df is None:
+            continue
 
-    log_step("步骤5：从 predict_data 中选择原始输入点位")
-    input_cols = select_input_columns_from_predict_data(predict_df)
-    if not input_cols:
-        raise ValueError("除时间列和目标列外，其余原始点位均为空，无法构造时序样本。")
+        if target_name not in target_df.columns:
+            log(f"{target_name}: 单目标列不存在，跳过保存")
+            del target_df
+            force_gc(f"main::{target_name}::missing_target")
+            continue
 
-    dataset_summaries = process_targets_and_export_sequence(
-        predict_df=predict_df,
-        input_cols=input_cols,
-    )
+        non_null_cnt = int(target_df[target_name].notna().sum())
+        log(f"{target_name}: 非空样本数: {non_null_cnt}")
 
-    del predict_df, input_cols
+        summary = save_forecasting_dataset(target_name, target_df)
+        saved_targets.append(summary)
+
+        del target_df
+        force_gc(f"main::{target_name}::saved")
+
+    del rt_df, lab_long_df
     force_gc("main::final_cleanup")
 
     log_step("完成")
-    log("当前版本已按以下顺序执行：")
+    log("当前版本流程：")
     log("1) merged.csv -> 清洗")
-    log("2) Laboratory_data.csv -> 清洗")
-    log("3) cleaned merged.csv -> 分钟级插值与补齐时间轴")
-    log("4) interpolated merged.csv + cleaned Laboratory_data.csv -> 化验纠偏对齐 -> predict_data.csv")
-    log("5) 基于 predict_data.csv，以目标非空时刻为终点切历史窗口")
-    log("6) 导出真正的 sequence regression 数据集（不再导出表格回归数据）")
-    log("7) 时间特征中的 unix_timestamp_seconds 保持 float64，避免分钟级精度丢失")
-    log(f"成功输出时序数据集目标数: {len(dataset_summaries)}")
+    log("2) cleaned merged.csv -> 分钟级插值与补齐时间轴")
+    log("3) Laboratory_data.csv -> 仅做时间解析与目标列数值化，不做清洗")
+    log("4) 插值后的 merged.csv + Laboratory_data.csv -> 化验纠偏对齐")
+    log("5) 为每个目标生成：时间戳 + 特征 + 单目标 的单目标表")
+    log("6) 参考 ETTh1，将单目标表导出为 BasicTSForecastingDataset 所需的 full-series 格式")
+    log("7) 每个目标目录输出 train/val/test_data.npy、*_timestamps.npy、meta.json")
+
+    log(f"成功输出目标数: {len(saved_targets)}")
+    if saved_targets:
+        log(f"成功输出目标摘要: {saved_targets}")
+
     log(f"总耗时: {time.time() - start_time:.2f} 秒")
 
 
