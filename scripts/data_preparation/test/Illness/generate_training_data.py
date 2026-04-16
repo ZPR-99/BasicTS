@@ -8,7 +8,7 @@ import pandas as pd
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
 # target path
-base_dir = os.path.abspath(os.path.dirname(os.path.join(current_dir, '../..', '../..')))
+base_dir = os.path.abspath(os.path.dirname(os.path.join(current_dir, '../../..', '../..')))
 
 # Hyperparameters
 dataset_name = 'Illness'

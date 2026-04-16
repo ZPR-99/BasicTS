@@ -3,8 +3,7 @@ from torch.optim.lr_scheduler import MultiStepLR
 from basicts import BasicTSLauncher
 from basicts.configs import BasicTSForecastingConfig
 from basicts.metrics import masked_mse
-from basicts.models.iTransformer import (iTransformerConfig,
-                                         iTransformerForForecasting)
+from basicts.models.iTransformer import (iTransformerConfig, iTransformerForForecasting)
 from basicts.runners.callback import EarlyStopping, GradientClipping
 
 
