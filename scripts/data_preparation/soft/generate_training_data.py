@@ -181,7 +181,7 @@ def get_output_root_dir():
 
 
 def get_sequence_root_dir():
-    return os.path.join(get_output_root_dir(), CONFIG["sequence_output"]["sequence_subdir"])
+    return get_output_root_dir()
 
 
 def get_predict_data_output_path():
