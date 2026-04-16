@@ -1,4 +1,3 @@
-
 import gc
 import json
 import os
@@ -593,7 +592,7 @@ def interpolate_merged_data(cleaned_df):
     total_start_nulls = int(df[cols_to_process].isna().sum().sum()) if cols_to_process else 0
 
     for i, col in enumerate(cols_to_process, start=1):
-        df[col] = smart_interpolate_column(df[col], gap_threshold).astype(np.float32)
+        df[col] = smart_interpolate_column(df[col], gap_threshold).astype(np.float64)
 
         if i % 10 == 0 or i == len(cols_to_process):
             log(f"插值进度: {i}/{len(cols_to_process)}")
