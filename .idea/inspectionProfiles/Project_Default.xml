@@ -1,0 +1,25 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="Eslint" enabled="true" level="WARNING" enabled_by_default="true" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="scikit-learn" />
+          <option value="matplotlib" />
+          <option value="seaborn" />
+          <option value="tensorflow" />
+          <option value="pytorch" />
+          <option value="dask" />
+          <option value="pyarrow" />
+          <option value="fastapi" />
+          <option value="uvicorn" />
+          <option value="joblib" />
+          <option value="click" />
+          <option value="logging" />
+          <option value="pytest" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
